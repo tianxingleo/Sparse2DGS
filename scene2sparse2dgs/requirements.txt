@@ -1,0 +1,16 @@
+# 场景重建 Pipeline - Python 依赖
+
+# 基础依赖
+opencv-python>=4.5.0
+numpy>=1.19.0
+Pillow>=8.0.0
+pyyaml>=5.4.0
+tqdm>=4.60.0
+
+# Sparse2DGS 依赖（需要手动安装）
+# 请运行:
+# cd /home/ltx/projects/Sparse2DGS
+# pip install -r requirements.txt
+
+# 可选依赖
+plyfile>=0.7.4  # 用于 PLY 文件处理

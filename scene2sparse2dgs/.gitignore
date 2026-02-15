@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 工作目录
+scene_reconstruction/
+braindance_workspace/
+temp_extract/
+trash_smart/
+
+# 视频文件（大文件不建议提交）
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flv
+
+# 输出结果
+results/
+outputs/
+*.ply
+*.obj
+
+# 临时文件
+*.log
+*.tmp
+.DS_Store
