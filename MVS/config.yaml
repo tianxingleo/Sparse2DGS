@@ -12,7 +12,7 @@ CLMVSNet:
     num_hypotheses: 8
     interval_ratio: 1
   group: 8
-  ckpt_path: "model_clmvsnet.ckpt"
+  ckpt_path: "/home/ltx/projects/Sparse2DGS/model_clmvsnet.ckpt"
 
 dataset:
-  path: "DTU_Sparse"
+  path: "/home/ltx/projects/Sparse2DGS/dtu_sparse"

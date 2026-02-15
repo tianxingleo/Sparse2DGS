@@ -25,6 +25,7 @@ LINUX_WORK_ROOT = Path.home() / "scene_reconstruction"
 MAX_IMAGES = 300  # 场景重建需要更多视角
 FPS = 4  # 抽帧率
 VIDEO_SCALE = 1920  # 视频缩放
+KEEP_PERCENTILE = 0.5  # 采样率 (预留字段)
 
 # Sparse2DGS 相关配置
 SPARSE2DGS_PATH = Path("/home/ltx/projects/Sparse2DGS")
@@ -154,12 +155,13 @@ def prepare_sparse2dgs_data(colmap_output, target_dir, scene_name):
     target_dir = Path(target_dir)
     scene_dir = target_dir / scene_name
     images_dir = scene_dir / "images"
-    sparse_dir = scene_dir / "sparse"
+    # Sparse2DGS 兼容性：创建 sparse/0 结构
+    sparse_target_dir = scene_dir / "sparse" / "0"
     
     # 创建目录结构
     scene_dir.mkdir(parents=True, exist_ok=True)
     images_dir.mkdir(parents=True, exist_ok=True)
-    sparse_dir.mkdir(parents=True, exist_ok=True)
+    sparse_target_dir.mkdir(parents=True, exist_ok=True)
     
     # 复制图像
     colmap_images = colmap_output / "raw_images"
@@ -167,34 +169,49 @@ def prepare_sparse2dgs_data(colmap_output, target_dir, scene_name):
         colmap_images = colmap_output / "images"
     
     image_count = 0
-    for ext in ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.PNG"]:
-        for img_path in colmap_images.glob(ext):
-            shutil.copy2(str(img_path), str(images_dir / img_path.name))
-            image_count += 1
+    if colmap_images.exists():
+        for ext in ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.PNG"]:
+            for img_path in colmap_images.glob(ext):
+                shutil.copy2(str(img_path), str(images_dir / img_path.name))
+                image_count += 1
     
     print(f"    ✅ 已复制 {image_count} 张图像")
     
-    # 复制 COLMAP sparse 数据
-    colmap_sparse = colmap_output / "sparse"
-    if not colmap_sparse.exists():
-        colmap_sparse = colmap_output / "colmap_output" / "sparse"
+    # 查找并复制 COLMAP sparse 数据
+    possible_dirs = [
+        colmap_output / "sparse" / "0",
+        colmap_output / "sparse",
+        colmap_output / "colmap_output" / "sparse" / "0",
+        colmap_output / "colmap_output" / "sparse",
+    ]
     
-    sparse_files_found = False
-    if colmap_sparse.exists():
-        for file in colmap_sparse.glob("*"):
-            if file.suffix in ['.bin', '.txt']:
-                shutil.copy2(str(file), str(sparse_dir / file.name))
-                sparse_files_found = True
+    src_sparse_dir = None
+    for d in possible_dirs:
+        if d.exists() and (d / "cameras.bin").exists():
+            src_sparse_dir = d
+            break
+            
+    # 兜底搜索
+    if not src_sparse_dir:
+        for root, dirs, files in os.walk(colmap_output):
+            if "cameras.bin" in files and "images.bin" in files:
+                src_sparse_dir = Path(root)
+                break
     
-    if not sparse_files_found:
-        print("❌ 未找到 COLMAP sparse 数据")
+    if src_sparse_dir:
+        copy_count = 0
+        for file in src_sparse_dir.glob("*"):
+            if file.suffix in ['.bin', '.txt', '.ini']:
+                shutil.copy2(str(file), str(sparse_target_dir / file.name))
+                copy_count += 1
+        print(f"    ✅ 已从 {src_sparse_dir.name} 复制 {copy_count} 个数据文件到 sparse/0")
+        return scene_dir
+    else:
+        print("❌ 未找到任何有效的 COLMAP sparse 数据 (cameras.bin/images.bin)")
         return None
-    
-    print(f"    ✅ Sparse2DGS 数据已准备: {scene_dir}")
-    return scene_dir
 
 # ================= 辅助工具：运行 Sparse2DGS 训练 =================
-def run_sparse2dgs_training(scene_dir, output_dir, scan_name):
+def run_sparse2dgs_training(scene_dir, output_dir, scan_name, env=None):
     """
     运行 Sparse2DGS 训练
     """
@@ -220,7 +237,7 @@ def run_sparse2dgs_training(scene_dir, output_dir, scan_name):
     ]
     
     # 运行训练
-    run_command(args, "训练 Sparse2DGS", cwd=str(SPARSE2DGS_PATH))
+    run_command(args, "训练 Sparse2DGS", cwd=str(SPARSE2DGS_PATH), env=env)
     
     print(f"\n✅ Sparse2DGS 训练完成！")
     print(f"   输出目录: {output_dir / scan_name}")
@@ -246,8 +263,18 @@ def run_pipeline(video_path, project_name):
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
     env["SETUPTOOLS_USE_DISTUTILS"] = "stdlib"
-
-    # ================= Step 1: 数据准备 =================
+    
+    # WSL CUDA 修复：确保能找到 GPU 驱动
+    wsl_lib_path = "/usr/lib/wsl/lib"
+    if os.path.exists(wsl_lib_path):
+        current_ld_path = env.get("LD_LIBRARY_PATH", "")
+        if wsl_lib_path not in current_ld_path:
+            env["LD_LIBRARY_PATH"] = f"{wsl_lib_path}:{current_ld_path}".strip(":")
+    
+    # 显式指定 GPU 设备
+    env["CUDA_VISIBLE_DEVICES"] = "0"
+    
+    print(f"🔧 环境配置: LD_LIBRARY_PATH={env.get('LD_LIBRARY_PATH', 'Not Set')}")
     step1_start = time.time()
     
     print(f"\n🎥 [Step 1/4] 数据准备")
@@ -285,7 +312,7 @@ def run_pipeline(video_path, project_name):
             "ffmpeg", "-y", "-i", str(work_dir / video_src.name),
             "-vf", vf_param, "-q:v", "2",
             str(temp_dir / "frame_%05d.jpg")
-        ], "抽帧")
+        ], "抽帧", env=env)
     except Exception as e:
         print(f"⚠️ FFmpeg 抽帧结束: {e}")
     
@@ -334,59 +361,88 @@ def run_pipeline(video_path, project_name):
     database_path = colmap_output_dir / "database.db"
     
     # 特征提取（使用系统 colmap）
-    run_command([
+    extractor_args = [
         system_colmap_exe, "feature_extractor",
         "--database_path", str(database_path),
         "--image_path", str(extracted_images_dir),
-        "--ImageReader.camera_model", "OPENCV",
-        "--ImageReader.single_camera", "1"
-    ], "特征提取 (COLMAP)")
+        "--ImageReader.camera_model", "PINHOLE",
+        "--ImageReader.single_camera", "1",
+        "--FeatureExtraction.use_gpu", "1"
+    ]
+    
+    try:
+        run_command(extractor_args, "特征提取 (COLMAP-GPU)", env=env)
+    except subprocess.CalledProcessError as e:
+        print(f"\n⚠️ CUDA 初始化失败或参数不兼容，尝试切换到 CPU 模式进行特征提取...")
+        extractor_args[-1] = "0" # 将 use_gpu 1 变为 0
+        run_command(extractor_args, "特征提取 (COLMAP-CPU)", env=env)
     
     # 顺序匹配（使用系统 colmap）
-    run_command([
+    matcher_args = [
         system_colmap_exe, "sequential_matcher",
         "--database_path", str(database_path),
-        "--SequentialMatching.overlap", "25"
-    ], "顺序匹配 (COLMAP)")
+        "--SequentialMatching.overlap", "25",
+        "--FeatureMatching.use_gpu", "1"
+    ]
+    
+    try:
+        run_command(matcher_args, "顺序匹配 (COLMAP-GPU)", env=env)
+    except subprocess.CalledProcessError as e:
+        print(f"\n⚠️ CUDA 初始化失败或参数不兼容，尝试切换到 CPU 模式进行特征匹配...")
+        matcher_args[-1] = "0" # 将 use_gpu 1 变为 0
+        run_command(matcher_args, "顺序匹配 (COLMAP-CPU)", env=env)
     
     # COLMAP Global Mapper（GLOMAP 全局重建）
     global_mapper_output_dir = colmap_output_dir / "sparse"
     global_mapper_output_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"    -> 运行 global_mapper...")
+    
+    global_mapper_args = [
+        system_colmap_exe, "global_mapper",
+        "--database_path", str(database_path),
+        "--image_path", str(extracted_images_dir),
+        "--output_path", str(global_mapper_output_dir)
+    ]
+    
     try:
-        run_command([
-            system_colmap_exe, "global_mapper",
-            "--database_path", str(database_path),
-            "--image_path", str(extracted_images_dir),
-            "--output_path", str(global_mapper_output_dir)
-        ], "COLMAP Global Mapper (GLOMAP 全局重建)")
+        run_command(global_mapper_args, "COLMAP Global Mapper (GLOMAP 全局重建)", env=env)
     except subprocess.CalledProcessError as e:
-        print(f"❌ COLMAP Global Mapper 失败: {e}")
-        print(f"   -> 错误代码: {e.returncode}")
-        
-        # 检查输出文件
-        print(f"   -> 检查输出目录: {global_mapper_output_dir}")
-        if global_mapper_output_dir.exists():
-            files = list(global_mapper_output_dir.glob("*.bin")) + list(global_mapper_output_dir.glob("*.txt"))
-            if files:
-                print(f"   -> 找到 {len(files)} 个输出文件")
-            else:
-                print(f"   -> 输出目录为空")
-        
-        # 尝试修复输出
-        required_files = ["cameras.bin", "images.bin", "points3D.bin"]
-        sparse_root = colmap_output_dir / "sparse"
-        for root, dirs, files in os.walk(sparse_root):
-            if all(f in files for f in required_files):
-                src_path = Path(root)
-                if not (colmap_output_dir / "sparse" / "0").exists():
-                    (colmap_output_dir / "sparse" / "0").mkdir(parents=True, exist_ok=True)
-                for f in required_files:
-                    shutil.move(str(src_path / f), str(colmap_output_dir / "sparse" / "0" / f))
-                print(f"   -> 已修复输出文件: {len(required_files)} 个")
-                break
-        raise e
+        print(f"\n⚠️ Global Mapper GPU 模式失败，尝试切换到 CPU 模式...")
+        cpu_args = global_mapper_args + [
+            "--GlobalMapper.gp_use_gpu", "0",
+            "--GlobalMapper.ba_ceres_use_gpu", "0"
+        ]
+        try:
+            run_command(cpu_args, "COLMAP Global Mapper (CPU 模式)", env=env)
+        except subprocess.CalledProcessError as e2:
+            print(f"❌ COLMAP Global Mapper 完全失败: {e2}")
+            
+            # 检查输出目录
+            if global_mapper_output_dir.exists():
+                files = list(global_mapper_output_dir.glob("*.bin")) + list(global_mapper_output_dir.glob("*.txt"))
+                if files:
+                    print(f"   -> 找到 {len(files)} 个输出文件")
+                else:
+                    print(f"   -> 输出目录为空")
+            
+            # 尝试修复逻辑：即使报错，也检查是否生成了模型文件
+            required_files = ["cameras.bin", "images.bin", "points3D.bin"]
+            sparse_root = colmap_output_dir / "sparse"
+            found_repair = False
+            for root, dirs, files in os.walk(sparse_root):
+                if all(f in files for f in required_files):
+                    src_path = Path(root)
+                    if not (colmap_output_dir / "sparse" / "0").exists():
+                        (colmap_output_dir / "sparse" / "0").mkdir(parents=True, exist_ok=True)
+                    for f in required_files:
+                        shutil.move(str(src_path / f), str(colmap_output_dir / "sparse" / "0" / f))
+                    print(f"   -> 已找到并修复输出文件: {len(required_files)} 个")
+                    found_repair = True
+                    break
+            
+            if not found_repair:
+                raise e2
     
     # 整理目录结构（COLMAP Global Mapper 输出）
     colmap_sparse_root = colmap_output_dir / "sparse"
@@ -446,7 +502,8 @@ def run_pipeline(video_path, project_name):
     output_dir = run_sparse2dgs_training(
         scene_dir,
         sparse2dgs_output_dir,
-        project_name
+        project_name,
+        env=env
     )
     
     step4_duration = time.time() - step4_start

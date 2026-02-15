@@ -10,7 +10,7 @@ factors = [2] * len(scenes)
 
 excluded_gpus = set([])
 
-dtu_path = 'dtu_sparse'
+dtu_path = '/home/ltx/projects/Sparse2DGS/dtu_sparse'
 output_dir = "exp_dtu/release"
 
 dry_run = False
@@ -40,7 +40,7 @@ def dispatch_jobs(jobs, executor):
     while jobs or future_to_job:
         # Get the list of available GPUs, not including those that are reserved.
         #all_available_gpus = set(GPUtil.getAvailable(order="first", limit=10, excludeID=[]))
-        all_available_gpus = set([4, 5, 6, 7])
+        all_available_gpus = set([0])
         #all_available_gpus = set([1, 2, 3])
         available_gpus = list(all_available_gpus - reserved_gpus - excluded_gpus)
         

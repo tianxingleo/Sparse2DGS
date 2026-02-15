@@ -115,3 +115,14 @@ frame_*.jpg
 *_depth.png
 *_depth.jpg
 depth_*
+
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+*.mp4
+
+*.ply
+
+*.txt

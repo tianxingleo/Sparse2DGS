@@ -13,7 +13,7 @@ def get_clmvsnet_model(name='CLMVSNet'):
     args = DotDict(config[name])
     mvs = globals()[name](args).cuda()
     print('successfully building {} model !'.format(name))
-    checkpoint = torch.load(args.ckpt_path, map_location="cpu") 
+    checkpoint = torch.load(args.ckpt_path, map_location="cpu", weights_only=False)
     mvs.load_state_dict(checkpoint["model"])
     print('load pretrained model from {}'.format(args.ckpt_path))
     return mvs
