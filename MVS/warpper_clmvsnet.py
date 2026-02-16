@@ -106,7 +106,7 @@ def get_mvs_depth(view_cam, scan=None):
         if ref_fea.shape[2:] != (h_orig, w_orig):
             ref_fea = F.interpolate(ref_fea, size=(h_orig, w_orig), mode='bilinear', align_corners=True)
             
-        ref_fea = ref_fea[0].cpu() # (C, H_orig, W_orig)
+        ref_fea = ref_fea.cpu() # 保持 (B, C, H, W) 维度，以兼容 train.py 中的 [0] 索引
         if ref_fea.dtype == torch.float32:
             ref_fea = ref_fea.half() # 使用半精度存储在 RAM 中
         

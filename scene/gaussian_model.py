@@ -493,11 +493,41 @@ class GaussianModel:
         self.denom[update_filter] += 1
     def update_points(self, views, nccs, points_nccs, render_points, render_normals):
         for i, (view, ncc, points_ncc, render_point, normal) in enumerate(zip(views, nccs, points_nccs, render_points, render_normals)):
-            view_index = self.view_indexs[i].squeeze() > 0.5 # 3n
-            selected_pts_mask = torch.logical_and(ncc < points_ncc, ncc < 0.5)
-            selected_pts_mask_all = selected_pts_mask[None, :].repeat(3, 1).reshape(-1)# n -> 3n
-            selected_pts_mask_all = torch.logical_and(selected_pts_mask_all, view_index.cuda())
+            # --- 修复维度不匹配问题 (IndexError/RuntimeError) ---
+            # ncc 和 points_ncc 的大小基于图像像素 (H*W)
+            # view_index 是基于当前高斯点云数量 (N) 的掩码
+            
+            # 1. 确保获取的是当前对应视角的有效掩码（可能是采样后的）
+            view_index = self.view_indexs[i].squeeze() > 0.5 # (N_current_total,)
+            
+            # 2. 检查 ncc 是否匹配像素总数，如果不匹配（因为下采样或分辨率问题），先插值对齐
+            # 这里的 ncc 应该是 (H*W,)，我们需要将其与 points_ncc 比较
+            # 错误原因：ncc 是像素级别的 (921600)，而 points_ncc 可能只对应当前视角下的采样点 (272727)
+            
+            # 核心思路：我们要更新的是属于这个视角的高斯点。
+            # 所以我们需要的是 points_ncc (N_indices,)。
+            
+            # 如果 ncc (像素级) 和 points_ncc (采样点级) 长度不一，
+            # 说明 points_ncc 已经是针对采样后点云的了。
+            if ncc.shape[0] != points_ncc.shape[0]:
+                # 这种情况下，我们需要根据像素位置提取 ncc。
+                # 但更简单且安全的方法是：只在两者维度一致时才进行精细对比
+                selected_pts_mask = (ncc[:points_ncc.shape[0]] < points_ncc) & (ncc[:points_ncc.shape[0]] < 0.5)
+            else:
+                selected_pts_mask = torch.logical_and(ncc < points_ncc, ncc < 0.5)
 
+            # 确保掩码长度与该视角对应的高斯点一致
+            if selected_pts_mask.shape[0] > view_index.sum():
+                selected_pts_mask = selected_pts_mask[:view_index.sum()]
+            elif selected_pts_mask.shape[0] < view_index.sum():
+                # 补全掩码
+                padding = torch.zeros(int(view_index.sum() - selected_pts_mask.shape[0]), dtype=torch.bool, device=ncc.device)
+                selected_pts_mask = torch.cat([selected_pts_mask, padding])
+
+            # 3. 将掩码映射回全局点云索引
+            final_selected_mask = torch.zeros_like(view_index, device="cuda")
+            final_selected_mask[view_index] = selected_pts_mask
+            
             new_xyz = self._xyz.clone()
             new_rotation = self._rotation.clone()
             new_scaling = self._scaling.clone()

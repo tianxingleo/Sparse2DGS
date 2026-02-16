@@ -54,6 +54,8 @@ def visualize_depth(depth, mask=None, depth_min=None, depth_max=None, direct=Fal
   return depth_color
 
 def visualize_feature_map(feature_map):
+    if len(feature_map.shape) == 3:
+        feature_map = feature_map[None]
     batch_size, channels, height, width = feature_map.shape
     feature_map_np = feature_map.detach().cpu().numpy().reshape(channels, height * width).T
     pca = PCA(n_components=3)
