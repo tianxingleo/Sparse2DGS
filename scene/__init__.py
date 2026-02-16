@@ -66,15 +66,27 @@ class Scene:
         self.cameras_extent = scene_info.nerf_normalization["radius"]
 
         for resolution_scale in resolution_scales:
-            print("Loading Training Cameras")
+            print("Loading Training Cameras (initially on CPU to save VRAM)")
+            # 强制使用 CPU 加载图片，避免 MVS 阶段 OOM
+            original_device = args.data_device
+            args.data_device = "cpu"
             self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
-            print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
-        
+            args.data_device = original_device
         
         for resolution_scale in resolution_scales:
             scan = args.source_path.split('/')[-1]
             self.train_cameras[resolution_scale] = get_mvs_depth(self.train_cameras[resolution_scale], scan=scan)
+            
+            # --- MVS 完成后，将图片和特征移至 GPU 进行后续的高斯训练 ---
+            print(f"Moving {len(self.train_cameras[resolution_scale])} cameras to {args.data_device} for training...")
+            for cam in self.train_cameras[resolution_scale]:
+                cam.original_image = cam.original_image.to(args.data_device)
+                # 显式将 MVS 特征移至 GPU，并恢复到 float32 以便计算 Loss
+                if hasattr(cam, 'feature'):
+                    cam.feature = cam.feature.to(args.data_device).float()
+                if cam.gt_alpha_mask is not None:
+                    cam.gt_alpha_mask = cam.gt_alpha_mask.to(args.data_device)
 
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,

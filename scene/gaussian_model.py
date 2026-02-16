@@ -153,19 +153,37 @@ class GaussianModel:
         fea_list = []
         idx_tensor = torch.zeros(len(views))
         view_idx = 0
+        
+        # --- 内存优化：采样率 (针对 12GB/16GB 环境) ---
+        # 如果图片很多，我们不能保留所有像素，否则 RAM 会爆炸
+        # 建议总点数维持在 200万 - 500万 左右
+        total_pixels = len(views) * views[0].original_image.shape[1] * views[0].original_image.shape[2]
+        sample_rate = min(1.0, 3000000 / total_pixels) 
+        if sample_rate < 1.0:
+            print(f"[Memory Save] 场景过大，将以 {sample_rate:.2%} 的比例采样点云以保护 RAM...")
+
         for view in views:
-            view_points = view.points  
-            view_color = view.original_image.cuda().reshape(3, -1).permute(1, 0)
-            view_feature = view.feature.reshape(8, -1).permute(1, 0) 
-            points_list.append(view_points)
-            color_list.append(view_color)
-            fea_list.append(view_feature)
+            view_points = view.points # (N, 3)
+            view_color = view.original_image.reshape(3, -1).permute(1, 0) # (N, 3)
+            view_feature = view.feature.reshape(8, -1).permute(1, 0) # (N, 8)
+            
+            if sample_rate < 1.0:
+                num_pts = view_points.shape[0]
+                # 随机采样，避免 RAM 溢出
+                indices = torch.randperm(num_pts)[:int(num_pts * sample_rate)]
+                view_points = view_points[indices]
+                view_color = view_color[indices]
+                view_feature = view_feature[indices]
+
+            points_list.append(view_points.cuda())
+            color_list.append(view_color.cuda())
+            fea_list.append(view_feature.cuda())
 
             view_idx_tensor = idx_tensor.clone()
             view_idx_tensor[view_idx] = 1
-            view_idx_tensor=view_idx_tensor[:, None].repeat(1, view_points.shape[0]).reshape(-1, 1)#3n 1
+            view_idx_tensor=view_idx_tensor[:, None].repeat(1, view_points.shape[0]).reshape(-1, 1)
             view_idx = view_idx + 1
-            self.view_indexs.append(view_idx_tensor)#3n 1
+            self.view_indexs.append(view_idx_tensor.cuda())
 
         pre_color = torch.cat(color_list, dim=0)
         pre_fea = torch.cat(fea_list, dim=0)

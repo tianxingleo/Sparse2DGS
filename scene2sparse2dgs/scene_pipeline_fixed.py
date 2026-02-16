@@ -19,10 +19,29 @@ import json
 import numpy as np
 import cv2
 import re
+import struct
+
+# 简单的 COLMAP 二进制读取工具，避免复杂的导入
+def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
+    """Read and unpack the next bytes from a binary file."""
+    data = fid.read(num_bytes)
+    return struct.unpack(endian_character + format_char_sequence, data)
+
+def qvec2rotmat(qvec):
+    return np.array([
+        [1 - 2 * qvec[2]**2 - 2 * qvec[3]**2,
+         2 * qvec[1] * qvec[2] - 2 * qvec[0] * qvec[3],
+         2 * qvec[3] * qvec[1] + 2 * qvec[0] * qvec[2]],
+        [2 * qvec[1] * qvec[2] + 2 * qvec[0] * qvec[3],
+         1 - 2 * qvec[1]**2 - 2 * qvec[3]**2,
+         2 * qvec[2] * qvec[3] - 2 * qvec[0] * qvec[1]],
+        [2 * qvec[3] * qvec[1] - 2 * qvec[0] * qvec[2],
+         2 * qvec[2] * qvec[3] + 2 * qvec[0] * qvec[1],
+         1 - 2 * qvec[1]**2 - 2 * qvec[2]**2]])
 
 # ================= 配置 =================
 LINUX_WORK_ROOT = Path.home() / "scene_reconstruction"
-MAX_IMAGES = 300  # 场景重建需要更多视角
+MAX_IMAGES = 50  # 场景重建需要更多视角
 FPS = 4  # 抽帧率
 VIDEO_SCALE = 1920  # 视频缩放
 KEEP_PERCENTILE = 0.5  # 采样率 (预留字段)
@@ -145,6 +164,149 @@ def run_command(cmd, description, env=None, cwd=None):
         print(f"❌ {description} 失败: {e}")
         raise e
 
+# ================= 辅助工具：生成 DTU 格式相机文件 (为 CLMVSNet 准备) =================
+def generate_dtu_cameras(colmap_sparse_dir, output_dtu_dir):
+    """
+    从 COLMAP sparse 目录读取数据，并生成 DTU 格式的 cam_*.txt 文件
+    CLMVSNet 训练需要这些文件中的 dp_min 和 dp_max
+    """
+    print(f"    -> 正在生成 DTU 格式相机参数 (供 MVS 深度估计使用)...")
+    
+    colmap_sparse_dir = Path(colmap_sparse_dir)
+    output_dtu_dir = Path(output_dtu_dir)
+    output_dtu_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 路径
+    cam_bin = colmap_sparse_dir / "cameras.bin"
+    img_bin = colmap_sparse_dir / "images.bin"
+    pts_bin = colmap_sparse_dir / "points3D.bin"
+    
+    if not (cam_bin.exists() and img_bin.exists() and pts_bin.exists()):
+        print(f"    ⚠️ 缺少 COLMAP 二进制文件，跳过 DTU 相机生成")
+        return False
+
+    # 1. 读取相机内参
+    intrinsics = {}
+    with open(str(cam_bin), "rb") as f:
+        num_cameras = read_next_bytes(f, 8, "Q")[0]
+        for _ in range(num_cameras):
+            camera_id, model_id, width, height = read_next_bytes(f, 24, "iiQQ")
+            num_params = 0
+            if model_id == 0: num_params = 3 # SIMPLE_PINHOLE
+            elif model_id == 1: num_params = 4 # PINHOLE
+            elif model_id == 2: num_params = 2 # SIMPLE_RADIAL
+            elif model_id == 4: num_params = 8 # OPENCV
+            
+            params = read_next_bytes(f, 8 * num_params, "d" * num_params)
+            
+            # 简化：只提取 K 矩阵
+            K = np.eye(3)
+            if model_id == 0: # SIMPLE_PINHOLE: f, cx, cy
+                K[0,0] = K[1,1] = params[0]
+                K[0,2], K[1,2] = params[1], params[2]
+            elif model_id == 1: # PINHOLE: fx, fy, cx, cy
+                K[0,0], K[1,1] = params[0], params[1]
+                K[0,2], K[1,2] = params[2], params[3]
+            else: # 兜底
+                K[0,0] = K[1,1] = params[0]
+                K[0,2], K[1,2] = width/2, height/2
+                
+            intrinsics[camera_id] = K
+
+    # 2. 读取 3D 点云 (为了计算深度范围)
+    with open(str(pts_bin), "rb") as f:
+        num_points = read_next_bytes(f, 8, "Q")[0]
+        xyzs = np.empty((num_points, 3))
+        for i in range(num_points):
+            binary_point_line_properties = read_next_bytes(f, 43, "QdddBBBd")
+            xyzs[i] = binary_point_line_properties[1:4]
+            track_length = read_next_bytes(f, 8, "Q")[0]
+            f.seek(8 * track_length, 1) # 跳过 track
+
+    # 3. 读取图像外参并生成文件
+    with open(str(img_bin), "rb") as f:
+        num_images = read_next_bytes(f, 8, "Q")[0]
+        for _ in range(num_images):
+            image_id, qw, qx, qy, qz, tx, ty, tz, camera_id = read_next_bytes(f, 64, "idddddddi")
+            image_name = ""
+            while True:
+                char = f.read(1).decode("utf-8")
+                if char == "\0": break
+                image_name += char
+            
+            num_points2d = read_next_bytes(f, 8, "Q")[0]
+            xys_point3d_ids = read_next_bytes(f, 24 * num_points2d, "ddq" * num_points2d)
+            
+            # 获取有效的 3D 点 id
+            point3d_ids = []
+            for i in range(num_points2d):
+                p_id = xys_point3d_ids[i*3 + 2]
+                if p_id != -1: point3d_ids.append(p_id)
+            
+            # 计算外参矩阵 w2c
+            R = qvec2rotmat([qw, qx, qy, qz])
+            T = np.array([tx, ty, tz])
+            
+            w2c = np.eye(4)
+            w2c[:3, :3] = R
+            w2c[:3, 3] = T
+            
+            # 计算深度范围 (dp_min, dp_max)
+            # Heuristic: 如果有可见点，基于可见点计算；否则使用全局点云的统计值
+            if len(point3d_ids) > 10:
+                # 这种方法比较慢，我们简单采样一些点
+                sample_ids = np.random.choice(point3d_ids, min(500, len(point3d_ids)), replace=False)
+                # 由于 xyzs 的索引不是 point3d_id，我们需要特殊处理。
+                # 但在 COLMAP 二进制中，xyzs 的顺序不一定对应 id。
+                # 为简单起见，我们使用一个粗略的范围：基于所有点的投影
+                pass 
+            
+            # 粗略方案：使用所有 3D 点投影到相机的深度
+            # 为了性能，只对前 1000 个点计算
+            pts_sample = xyzs[::max(1, len(xyzs)//1000)]
+            pts_cam = (R @ pts_sample.T).T + T
+            depths = pts_cam[:, 2]
+            depths = depths[depths > 0] # 只要相机前方的点
+            
+            if len(depths) > 0:
+                dp_min = np.percentile(depths, 5) * 0.8
+                dp_max = np.percentile(depths, 95) * 1.2
+            else:
+                dp_min, dp_max = 0.1, 10.0 # 兜底值
+            
+            # 获取重建的分辨率 (实际存储的分辨率)
+            try:
+                from PIL import Image
+                with Image.open(str(images_dir / image_name)) as img:
+                    actual_width, actual_height = img.size
+            except:
+                actual_width, actual_height = width, height
+
+            # 写入文件
+            K = intrinsics[camera_id].copy()
+            # 如果实际分辨率和 COLMAP 记录的分辨率不一致 (因为我们压缩了图像)，则需要缩放内参
+            if width != actual_width or height != actual_height:
+                scale_x = actual_width / width
+                scale_y = actual_height / height
+                K[0,0] *= scale_x
+                K[1,1] *= scale_y
+                K[0,2] *= scale_x
+                K[1,2] *= scale_y
+
+            txt_name = f"cam_{Path(image_name).stem}.txt"
+            with open(str(output_dtu_dir / txt_name), "w") as tf:
+                # K
+                for row in K: tf.write(f"{row[0]} {row[1]} {row[2]}\n")
+                tf.write("\n")
+                # w2c
+                for row in w2c: tf.write(f"{row[0]} {row[1]} {row[2]} {row[3]}\n")
+                tf.write("\n")
+                # depth range
+                tf.write(f"{dp_min} {dp_max}\n")
+    
+    print(f"    ✅ 已生成 {num_images} 个 DTU 格式相机文件")
+    return True
+
 # ================= 辅助工具：准备 Sparse2DGS 数据 =================
 def prepare_sparse2dgs_data(colmap_output, target_dir, scene_name):
     """
@@ -163,16 +325,33 @@ def prepare_sparse2dgs_data(colmap_output, target_dir, scene_name):
     images_dir.mkdir(parents=True, exist_ok=True)
     sparse_target_dir.mkdir(parents=True, exist_ok=True)
     
-    # 复制图像
+    # 复制图像并进行 4K -> 2K 压缩以节省内存 (建议)
     colmap_images = colmap_output / "raw_images"
     if not colmap_images.exists():
         colmap_images = colmap_output / "images"
     
     image_count = 0
     if colmap_images.exists():
+        print(f"    📷 正在处理图像 (保持高质量但限制最大边长为 2048 以节省内存)...")
+        from PIL import Image
         for ext in ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.PNG"]:
             for img_path in colmap_images.glob(ext):
-                shutil.copy2(str(img_path), str(images_dir / img_path.name))
+                target_path = images_dir / img_path.name
+                try:
+                    with Image.open(img_path) as img:
+                        # 如果图像过大，将其等比例缩小到 720P 水准 (1280px)
+                        # 这将极大降低 RAM / VRAM 开发，防止系统崩溃
+                        max_dim = 1280
+                        if img.width > max_dim or img.height > max_dim:
+                            scale = max_dim / max(img.width, img.height)
+                            new_size = (int(img.width * scale), int(img.height * scale))
+                            img = img.resize(new_size, Image.Resampling.LANCZOS)
+                        img.save(target_path, quality=95)
+                    image_count += 1
+                except Exception as e:
+                    print(f"    ⚠️ 图像 {img_path.name} 处理失败: {e}")
+                    shutil.copy2(str(img_path), str(target_path))
+                    image_count += 1
                 image_count += 1
     
     print(f"    ✅ 已复制 {image_count} 张图像")
@@ -205,6 +384,11 @@ def prepare_sparse2dgs_data(colmap_output, target_dir, scene_name):
                 shutil.copy2(str(file), str(sparse_target_dir / file.name))
                 copy_count += 1
         print(f"    ✅ 已从 {src_sparse_dir.name} 复制 {copy_count} 个数据文件到 sparse/0")
+        
+        # --- 新增：为 Sparse2DGS 的 MVS 模块生成 DTU 格式相机文件 ---
+        dtu_dir = SPARSE2DGS_PATH / "dtu_sparse" / scene_name
+        generate_dtu_cameras(src_sparse_dir, dtu_dir)
+        
         return scene_dir
     else:
         print("❌ 未找到任何有效的 COLMAP sparse 数据 (cameras.bin/images.bin)")

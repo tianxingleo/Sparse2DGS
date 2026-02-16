@@ -16,9 +16,9 @@ def convert_dataset_dtu(view_cam=None, scan=None):
 
     for i, cam in enumerate(view_cam):
        
-        view_k = cam.K.float().cuda() 
-        view_w2c = cam.w2c.float().cuda()
-        proj_mat = torch.zeros(2, 4, 4).cuda()
+        view_k = cam.K.float()
+        view_w2c = cam.w2c.float()
+        proj_mat = torch.zeros(2, 4, 4)
         proj_mat[0, :4, :4] = view_w2c
         proj_mat[1, :3, :3] = view_k
 
@@ -26,9 +26,9 @@ def convert_dataset_dtu(view_cam=None, scan=None):
 
         init_depth_hypotheses, depth_values = get_depth_value(dp_min, dp_max, num_depth=192)
 
-        setattr(view_cam[i], 'init_depth_hypotheses', torch.from_numpy(init_depth_hypotheses).float().cuda())
-        setattr(view_cam[i], 'depth_values', torch.from_numpy(depth_values).float().cuda())
-        setattr(view_cam[i], 'proj_mat', proj_mat.float().cuda())
+        setattr(view_cam[i], 'init_depth_hypotheses', torch.from_numpy(init_depth_hypotheses).float())
+        setattr(view_cam[i], 'depth_values', torch.from_numpy(depth_values).float())
+        setattr(view_cam[i], 'proj_mat', proj_mat.float())
 
     return view_cam
         
