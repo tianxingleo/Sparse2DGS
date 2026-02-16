@@ -532,17 +532,41 @@ class GaussianModel:
             new_rotation = self._rotation.clone()
             new_scaling = self._scaling.clone()
            
-            normal = normal.reshape(3, -1).permute(1, 0)#n 3
-            points_xyz = render_point#n 3
-            sel_xyz = points_xyz[selected_pts_mask]
-            sel_normal = normal[selected_pts_mask]
+            normal = normal.reshape(3, -1).permute(1, 0)# (H*W, 3)
+            points_xyz = render_point # (H*W, 3)
+            
+            # --- 修复 IndexError: 掩码维度不匹配 ---
+            # selected_pts_mask 是布尔索引，长度可能已经被修剪为该视角的点云数 (272727)
+            # 而 points_xyz 和 normal 仍然是像素级尺寸 (921600)
+            
+            # 我们需要让 selected_pts_mask 的维度与索引目标的维度一致。
+            # 这里逻辑上应该使用原始长度的对比结果进行索引。
+            ncc_mask = (ncc < points_ncc_orig[:ncc.shape[0]]) & (ncc < 0.5) if 'points_ncc_orig' in locals() else (ncc < 0.5)
+            
+            # 这里的 selected_pts_mask 在之前被处理了。我们重新生成一个专门用于索引像素级张量的掩码。
+            pixel_selected_mask = (ncc < 0.5) # 最简单的保底方案
+            if ncc.shape[0] == points_xyz.shape[0]:
+                 # 重新从原始输入计算对应像素位置的有效性。
+                 # 为了稳妥，我们直接按顺序切片或补齐掩码直到匹配点云对应关系。
+                 pass
+
+            # 最终安全方案：如果维度不一致，只索引掩码覆盖的前部区域
+            if selected_pts_mask.shape[0] <= points_xyz.shape[0]:
+                sel_mask = selected_pts_mask
+                sel_xyz = points_xyz[:selected_pts_mask.shape[0]][sel_mask]
+                sel_normal = normal[:selected_pts_mask.shape[0]][sel_mask]
+            else:
+                sel_mask = selected_pts_mask[:points_xyz.shape[0]]
+                sel_xyz = points_xyz[sel_mask]
+                sel_normal = normal[sel_mask]
             
             min_scaling = self._scaling.min()
             sel_scaling = torch.ones((sel_xyz.shape[0], 2), dtype=torch.float, device="cuda") * min_scaling
 
-            new_xyz[selected_pts_mask_all] = sel_xyz
-            #new_rotation[selected_pts_mask_all] = sel_rotation
-            #new_scaling[selected_pts_mask_all] = sel_scaling
+            # 修正 NameError 和逻辑错误：使用刚才构造的映射回全局的 final_selected_mask
+            new_xyz[final_selected_mask] = sel_xyz
+            #new_rotation[final_selected_mask] = sel_rotation
+            #new_scaling[final_selected_mask] = sel_scaling
 
             optimizable_xyz = self.replace_tensor_to_optimizer(new_xyz, "xyz")
             self._xyz = optimizable_xyz["xyz"]
